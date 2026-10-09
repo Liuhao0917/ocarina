@@ -4085,102 +4085,135 @@ package body Ocarina.Backends.C_Common.BA is
       Declarations : List_Id;
       Statements   : List_Id)
    is
-      BA                         : Node_Id;
-      Behav_Transition           : Node_Id;
-      N                          : Node_Id;
-      Dispatch_Transition        : Node_Id := No_Node;
-      Transition_Node            : Node_Id;
-      E            : constant Node_Id := AIN.Parent_Subcomponent (S);
+      BA : constant Node_Id := Get_Behavior_Specification (S);
+      E  : constant Node_Id := AIN.Parent_Subcomponent (S);
+      State, State_Identifier    : Node_Id;
+      Dispatch_Transition       : Node_Id;
+      Switch_Alternatives       : constant List_Id :=
+        New_List (CTN.K_Alternatives_List);
+      Switch_Statements         : List_Id;
+      Switch_Labels             : List_Id;
+      Has_Dispatch_Transitions   : Boolean := False;
+      Has_Execution_Destination  : Boolean := False;
+
+      function Find_Dispatch_Transition
+        (Identifier : Node_Id) return Node_Id
+      is
+         State_Name : constant Name_Id :=
+           Standard.Utils.To_Upper (BATN.Display_Name (Identifier));
+         Behav_Transition : Node_Id :=
+           BATN.First_Node (BATN.Transitions (BA));
+         Transition_Node, Source : Node_Id;
+      begin
+         while Present (Behav_Transition) loop
+            Transition_Node := BATN.Transition (Behav_Transition);
+            if BATN.Kind (Transition_Node) =
+              BATN.K_Execution_Behavior_Transition
+              and then Present (BATN.Behavior_Condition (Transition_Node))
+              and then Present (BATN.Condition
+                (BATN.Behavior_Condition (Transition_Node)))
+              and then BATN.Kind (BATN.Condition
+                (BATN.Behavior_Condition (Transition_Node))) =
+                BATN.K_Dispatch_Condition_Thread
+            then
+               --  A transition may list more than one source state.
+               Source := BATN.First_Node (BATN.Sources (Transition_Node));
+               while Present (Source) loop
+                  if State_Name = Standard.Utils.To_Upper
+                    (BATN.Display_Name (Source))
+                  then
+                     return Transition_Node;
+                  end if;
+                  Source := BATN.Next_Node (Source);
+               end loop;
+            end if;
+            Behav_Transition := BATN.Next_Node (Behav_Transition);
+         end loop;
+         return No_Node;
+      end Find_Dispatch_Transition;
    begin
-      --  void <<thread_name>>_ba_body
-      --      (__po_hi_task_id self)
-      --  {
-      --    base_types__integer tmp;
-      --    test__ba__backend__alpha_type tmp2;
-      --
-      --    /** 1) mapping actions of the transition having the
-      --    « on dispatch » condition **/
-      --
-      --    ...
-      --
-      --    /** 2) update the current state **/
-      --    __po_hi_producer_current_state = __po_hi_producer_states_array[1];
-      --
-      --    /** 3) Now we examine __po_hi_producer_current_state if
-      --    it is not a « complete » state, i.e. it is an « execution » state,
-      --    then we should proceed transitions until reaching
-      --    a « complete » state. **/
-      --
-
-      BA := Get_Behavior_Specification (S);
-
       Map_C_Behavior_Variables (S, Declarations);
 
-      Behav_Transition := BATN.First_Node (BATN.Transitions (BA));
-
-      while Present (Behav_Transition) loop
-         Transition_Node := BATN.Transition (Behav_Transition);
-
-         if Present (Behavior_Condition (Transition_Node))
-           and then Present (BATN.Condition
-                             (Behavior_Condition (Transition_Node)))
-           and then
-             BATN.Kind (BATN.Condition (Behavior_Condition (Transition_Node)))
-           = BATN.K_Dispatch_Condition_Thread
+      State := BATN.First_Node (BATN.States (BA));
+      while Present (State) loop
+         if Behavior_State_Kind'Val (BATN.State_Kind (State)) in
+           BSK_Initial_Complete | BSK_Initial_Complete_Final |
+           BSK_Complete | BSK_Complete_Final
          then
-            Dispatch_Transition := Transition_Node;
+            State_Identifier := BATN.First_Node (BATN.Identifiers (State));
+            while Present (State_Identifier) loop
+               Dispatch_Transition :=
+                 Find_Dispatch_Transition (State_Identifier);
+               if Present (Dispatch_Transition) then
+                  Has_Dispatch_Transitions := True;
+                  Switch_Statements := New_List (CTN.K_Statement_List);
+                  Switch_Labels := New_List (CTN.K_Label_List);
+                  Append_Node_To_List
+                    (Make_Defining_Identifier
+                       (BATN.Display_Name (State_Identifier)),
+                     Switch_Labels);
+
+                  if Present (BATN.Behavior_Action_Block (Dispatch_Transition))
+                    and then Present (BATN.Behav_Acts
+                      (BATN.Behavior_Action_Block (Dispatch_Transition)))
+                  then
+                     Map_C_Behavior_Action_Block
+                       (BATN.Behavior_Action_Block (Dispatch_Transition),
+                        S, Declarations, Switch_Statements);
+                  end if;
+                  Update_Current_State
+                    (E, BA, Dispatch_Transition, Switch_Statements);
+
+                  Append_Node_To_List
+                    (Make_Switch_Alternative
+                       (Switch_Labels, Switch_Statements),
+                     Switch_Alternatives);
+
+                  if Behavior_State_Kind'Val
+                    (Search_State_Kind
+                       (BA, BATN.Destination (Dispatch_Transition))) =
+                    BSK_No_Kind
+                  then
+                     Has_Execution_Destination := True;
+                  end if;
+               end if;
+               State_Identifier := BATN.Next_Node (State_Identifier);
+            end loop;
          end if;
-
-         exit when Present (Dispatch_Transition);
-
-         Behav_Transition := BATN.Next_Node (Behav_Transition);
+         State := BATN.Next_Node (State);
       end loop;
 
-      if Present (Dispatch_Transition) then
-         if Present (BATN.Behavior_Action_Block (Dispatch_Transition))
-           and then Present (BATN.Behav_Acts
-                             (BATN.Behavior_Action_Block
-                                (Dispatch_Transition)))
-         then
-            --  1) mapping actions of the transition having
-            --  the « on dispatch » condition
+      if Has_Dispatch_Transitions then
+         Append_Node_To_List
+           (Message_Comment
+              ("Select the on-dispatch transition from the current "
+               & "complete state; take one dispatch transition per call."),
+            Statements);
+         Append_Node_To_List
+           (Make_Switch_Alternative (No_List, No_List),
+            Switch_Alternatives);
+         Append_Node_To_List
+           (Make_Switch_Statement
+              (Expression => Make_Member_Designator
+                 (Defining_Identifier => Make_Defining_Identifier
+                    (MN (M_Name)),
+                  Aggregate_Name => Make_Defining_Identifier
+                    (Map_C_Variable_Name (E, Current_State => True))),
+               Alternatives => Switch_Alternatives),
+            Statements);
+      end if;
 
-            N := Message_Comment
-              ("1) Mapping actions of the transition having "
-               & " the 'on dispatch' condition.");
-
-            CTU.Append_Node_To_List (N, Statements);
-
-            Map_C_Behavior_Action_Block
-              (BATN.Behavior_Action_Block (Dispatch_Transition),
-               S, Declarations, Statements);
-         end if;
-
-         --  2) update the current state
-         Update_Current_State (E, BA, Dispatch_Transition, Statements);
-
-         --  3) Now we examine __po_hi_producer_current_state if
-         --  it is not a « complete » state, i.e. it is an « execution »
-         --  state,then we should proceed transitions until reaching
-         --  a « complete » state.
-         --
-         if Behavior_State_Kind'Val
-           (Search_State_Kind (BA, BATN.Destination (Dispatch_Transition)))
-           = BSK_No_Kind
-         then
-            N := Message_Comment
-              ("3) As the current state is execution state "
-               & " then we should proceed transitions until reaching"
-               & " a 'complete' state.");
-
-            CTU.Append_Node_To_List (N, Statements);
-            Examine_Current_State_Until_Reaching_Complete_State
-              (S, BA, Declarations, Statements);
-         end if;
+      if Has_Execution_Destination then
+         Append_Node_To_List
+           (Message_Comment
+              ("Continue through execution states until a complete "
+               & "state is reached, then wait for the next dispatch."),
+            Statements);
+         Examine_Current_State_Until_Reaching_Complete_State
+           (S, BA, Declarations, Statements);
       end if;
 
       Map_C_Implementation_of_BA_Body_Function (S, Declarations, Statements);
-
    end Make_BA_Body_Function_For_Periodic_Thread;
 
    ----------------------------------------
