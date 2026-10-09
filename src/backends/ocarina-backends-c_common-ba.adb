@@ -459,464 +459,6 @@ package body Ocarina.Backends.C_Common.BA is
    --
    --     end Get_Instances_Of_Component_Type;
 
-   --  Only integer expressions used by mod need this target-side type
-   --  selection.  Compare maximum nonnegative values after promotion: this
-   --  preserves both range and signedness without assuming a host int size.
-   type BA_Integer_Type is record
-      Type_Name    : Name_Id := No_Name;
-      Maximum_Name : Name_Id := No_Name;
-      Is_Promoted  : Boolean := False;
-   end record;
-
-   type BA_Integer_Iterator;
-   type BA_Integer_Iterator_Access is access all BA_Integer_Iterator;
-   type BA_Integer_Iterator is record
-      Iterator_Name : Name_Id;
-      Data_Instance : Node_Id;
-      Previous      : BA_Integer_Iterator_Access;
-   end record;
-   Current_Integer_Iterator : BA_Integer_Iterator_Access := null;
-
-   function Integer_Type_Of
-     (Node : Node_Id; Subprogram_Root : Node_Id) return BA_Integer_Type;
-
-   function Integer_Type_Info
-     (Type_Spelling, Maximum_Spelling : String;
-      Is_Promoted : Boolean := False) return BA_Integer_Type
-   is
-   begin
-      return (Get_String_Name (Type_Spelling),
-              Get_String_Name (Maximum_Spelling), Is_Promoted);
-   end Integer_Type_Info;
-
-   function Integer_Type_Index (Value : Name_Id) return String is
-      Spelling : constant String := Name_Id'Image (Value);
-   begin
-      return Spelling (Spelling'First + 1 .. Spelling'Last);
-   end Integer_Type_Index;
-
-   function Emit_Integer_Type
-     (Alias_Spelling, Selection : String) return BA_Integer_Type
-   is
-      Marker : constant Name_Id := Get_String_Name
-        (Alias_Spelling & "_defined");
-      Existing_Node : Node_Id := CTN.First_Node
-        (CTN.Declarations (Current_File));
-   begin
-      while Present (Existing_Node) loop
-         if CTN.Kind (Existing_Node) = CTN.K_Define_Statement
-           and then CTN.Name (CTN.Defining_Identifier (Existing_Node)) = Marker
-         then
-            return Integer_Type_Info
-              (Alias_Spelling, Alias_Spelling & "_MAX", Is_Promoted => True);
-         end if;
-         Existing_Node := CTN.Next_Node (Existing_Node);
-      end loop;
-      Add_Include (Make_Include_Clause
-        (Make_Defining_Identifier (Get_String_Name ("limits"), False),
-         Local => False));
-      Add_Include (Make_Include_Clause
-        (Make_Defining_Identifier (Get_String_Name ("stdint"), False),
-         Local => False));
-      Append_Node_To_List
-        (Message_Comment
-           ("Select the integer range and signedness on the target C "
-            & "compiler; the generator's native integer size is irrelevant."),
-         CTN.Declarations (Current_File));
-      --  The existing C tree has no #if-expression node.  Keep this small
-      --  standard-C99 declaration template separate from runtime expressions.
-      --  The marker also deduplicates declarations within the current source.
-      Append_Node_To_List
-        (Make_Define_Statement
-           (Make_Defining_Identifier (Marker, False),
-            Make_Defining_Identifier
-              (Get_String_Name ("1" & ASCII.LF & Selection), False)),
-         CTN.Declarations (Current_File));
-      return Integer_Type_Info
-        (Alias_Spelling, Alias_Spelling & "_MAX", Is_Promoted => True);
-   end Emit_Integer_Type;
-
-   function Integer_Type_Branch
-     (Alias_Spelling : String; Info : BA_Integer_Type) return String
-   is
-   begin
-      return "typedef " & Get_Name_String (Info.Type_Name) & " "
-        & Alias_Spelling & ";" & ASCII.LF
-        & "#define " & Alias_Spelling & "_MAX "
-        & Get_Name_String (Info.Maximum_Name) & ASCII.LF;
-   end Integer_Type_Branch;
-
-   function Promote_Integer_Type
-     (Info : BA_Integer_Type) return BA_Integer_Type
-   is
-      Alias_Spelling : constant String := "ocarina_ba_promoted_"
-        & Integer_Type_Index (Info.Type_Name);
-   begin
-      --  A common type is already promoted. Reusing it keeps consecutive
-      --  mod operations on one helper instead of adding redundant aliases.
-      if Info.Is_Promoted then
-         return Info;
-      elsif Info.Maximum_Name = Get_String_Name ("INT_MAX") then
-         return Integer_Type_Info ("int", "INT_MAX", Is_Promoted => True);
-      end if;
-      return Emit_Integer_Type
-        (Alias_Spelling,
-         "#if " & Get_Name_String (Info.Maximum_Name) & " <= INT_MAX"
-         & ASCII.LF
-         & Integer_Type_Branch
-           (Alias_Spelling, Integer_Type_Info ("int", "INT_MAX"))
-         & "#else" & ASCII.LF
-         & Integer_Type_Branch (Alias_Spelling, Info)
-         & "#endif");
-   end Promote_Integer_Type;
-
-   function Common_Integer_Type
-     (Left, Right : BA_Integer_Type) return BA_Integer_Type
-   is
-      Left_Info : constant BA_Integer_Type := Promote_Integer_Type (Left);
-      Right_Info : constant BA_Integer_Type := Promote_Integer_Type (Right);
-      Alias_Spelling : constant String := "ocarina_ba_common_"
-        & Integer_Type_Index (Left_Info.Type_Name) & "_"
-        & Integer_Type_Index (Right_Info.Type_Name);
-   begin
-      if Left_Info.Maximum_Name = Right_Info.Maximum_Name then
-         return Left_Info;
-      end if;
-      --  Positive maxima can be compared by the preprocessor without signed
-      --  overflow.  The larger range is exactly the usual arithmetic result's
-      --  range after promotion, including signed-wide/unsigned-narrow pairs.
-      return Emit_Integer_Type
-        (Alias_Spelling,
-         "#if " & Get_Name_String (Left_Info.Maximum_Name) & " >= "
-         & Get_Name_String (Right_Info.Maximum_Name) & ASCII.LF
-         & Integer_Type_Branch (Alias_Spelling, Left_Info)
-         & "#else" & ASCII.LF
-         & Integer_Type_Branch (Alias_Spelling, Right_Info)
-         & "#endif");
-   end Common_Integer_Type;
-
-   function Declared_Integer_Type
-     (Data_Instance, Source_Node : Node_Id) return BA_Integer_Type
-   is
-      Data_Size : Size_Type;
-      Byte_Count : Unsigned_Long_Long;
-      Width : Natural;
-   begin
-      if Present (Data_Instance)
-        and then Get_Data_Representation (Data_Instance) = Data_Integer
-      then
-         Data_Size := Get_Data_Size (Data_Instance);
-         if Data_Size.S = 0 then
-            --  Match C_Common.Types: unspecified size maps to signed int,
-            --  even when Number_Representation says unsigned.
-            return Integer_Type_Info ("int", "INT_MAX");
-         end if;
-         Byte_Count := To_Bytes (Data_Size);
-         if Byte_Count = 1 or else Byte_Count = 2
-           or else Byte_Count = 4 or else Byte_Count = 8
-         then
-            Width := Natural (Byte_Count) * 8;
-            declare
-               Width_Image : constant String := Natural'Image (Width);
-               Width_Text : constant String := Width_Image
-                 (Width_Image'First + 1 .. Width_Image'Last);
-               Maximum_Prefix : constant String :=
-                 (if Get_Number_Representation (Data_Instance) = Signed
-                  then "INT" else "UINT");
-            begin
-               return
-                 (CTN.Name (Map_C_Data_Type_Designator (Data_Instance)),
-                  Get_String_Name (Maximum_Prefix & Width_Text & "_MAX"),
-                  False);
-            end;
-         end if;
-      end if;
-      Display_Located_Error
-        (BATN.Loc (Source_Node),
-         "Cannot determine the C integer type of this mod operand",
-         Fatal => True);
-      return (No_Name, No_Name, False);
-   end Declared_Integer_Type;
-
-   function Integer_Name_Instance
-     (Node, Subprogram_Root : Node_Id;
-      Owner : Node_Id := No_Node) return Node_Id
-   is
-      Variable_Node, Data_Instance, Item : Node_Id := No_Node;
-      Items : List_Id := No_List;
-      Iterator : BA_Integer_Iterator_Access := Current_Integer_Iterator;
-
-      function Same_Name (Actual_Name : Name_Id) return Boolean is
-      begin
-         return Standard.Utils.To_Lower (Actual_Name) =
-           Standard.Utils.To_Lower (BATN.Display_Name (Node));
-      end Same_Name;
-   begin
-      case BATN.Kind (Node) is
-         when BATN.K_Identifier =>
-            if Present (Owner) then
-               for Field of Subcomponents_Of (Owner) loop
-                  if Same_Name (AIN.Display_Name (AIN.Identifier (Field))) then
-                     return AIN.Corresponding_Instance (Field);
-                  end if;
-               end loop;
-            else
-               while Iterator /= null loop
-                  if Same_Name (Iterator.Iterator_Name) then
-                     return Iterator.Data_Instance;
-                  end if;
-                  Iterator := Iterator.Previous;
-               end loop;
-               Variable_Node := Find_BA_Variable
-                 (Node, Get_Behavior_Specification (Subprogram_Root));
-               if Present (Variable_Node) then
-                  return AAN.Default_Instance
-                    (BATN.Corresponding_Declaration
-                       (BATN.Classifier_Ref (Variable_Node)));
-               end if;
-               for Feature of Features_Of (Subprogram_Root) loop
-                  if Same_Name (AIN.Display_Name (AIN.Identifier (Feature)))
-                  then
-                     return AIN.Corresponding_Instance (Feature);
-                  end if;
-               end loop;
-               for Field of Subcomponents_Of (Subprogram_Root) loop
-                  if Same_Name (AIN.Display_Name (AIN.Identifier (Field))) then
-                     return AIN.Corresponding_Instance (Field);
-                  end if;
-               end loop;
-            end if;
-         when BATN.K_Name =>
-            Items := BATN.Idt (Node);
-         when BATN.K_Data_Component_Reference =>
-            Items := BATN.Identifiers (Node);
-         when others =>
-            null;
-      end case;
-      Data_Instance := Owner;
-      if not BANu.Is_Empty (Items) then
-         Item := BATN.First_Node (Items);
-         while Present (Item) loop
-            Data_Instance := Integer_Name_Instance
-              (Item, Subprogram_Root, Data_Instance);
-            exit when No (Data_Instance);
-            Item := BATN.Next_Node (Item);
-         end loop;
-         if Present (Data_Instance) and then BATN.Kind (Node) = BATN.K_Name
-           and then not BANu.Is_Empty (BATN.Array_Index (Node))
-         then
-            Item := BATN.First_Node (BATN.Array_Index (Node));
-            while Present (Item) loop
-               if Get_Data_Representation (Data_Instance) /= Data_Array
-                 or else No (Get_Base_Type (Data_Instance))
-               then
-                  return No_Node;
-               end if;
-               --  Consume this classifier's dimensions before following its
-               --  element type, which may itself be another array classifier.
-               declare
-                  Dimensions : constant ULL_Array :=
-                    Get_Dimension (Data_Instance);
-               begin
-                  if Dimensions'Length = 0 then
-                     return No_Node;
-                  end if;
-                  for Dimension in Dimensions'Range loop
-                     if No (Item) then
-                        return No_Node;
-                     end if;
-                     Item := BATN.Next_Node (Item);
-                  end loop;
-               end;
-               Data_Instance := AAN.Entity
-                 (AAN.First_Node (Get_Base_Type (Data_Instance)));
-            end loop;
-         end if;
-         return Data_Instance;
-      end if;
-      return No_Node;
-   end Integer_Name_Instance;
-
-   function Literal_Integer_Type (Node : Node_Id) return BA_Integer_Type is
-      use type Ocarina.AADL_Values.Literal_Type;
-      Literal_Value : constant Ocarina.AADL_Values.Value_Type :=
-        Ocarina.AADL_Values.Value (BATN.Value (Node));
-      Magnitude_Image : constant String := Unsigned_Long_Long'Image
-        (Literal_Value.IVal);
-      Magnitude : constant String := Magnitude_Image
-        (Magnitude_Image'First + 1 .. Magnitude_Image'Last);
-      Based : constant Boolean := not Literal_Value.ISign
-        and then (Literal_Value.IBase = 8 or else Literal_Value.IBase = 16);
-      Alias_Spelling : constant String := "ocarina_ba_literal_"
-        & (if Based then "based_" else "decimal_") & Magnitude;
-
-      function Candidate
-        (Directive, Type_Spelling, Maximum_Spelling : String) return String
-      is
-      begin
-         return Directive & " " & Magnitude & "ULL <= " & Maximum_Spelling
-           & ASCII.LF & Integer_Type_Branch
-             (Alias_Spelling,
-              Integer_Type_Info (Type_Spelling, Maximum_Spelling));
-      end Candidate;
-   begin
-      if Literal_Value.T /= Ocarina.AADL_Values.LT_Integer then
-         Display_Located_Error
-           (BATN.Loc (Node), "mod requires an integer operand", Fatal => True);
-      end if;
-      --  Every C99 int represents these values; avoid aliases for small
-      --  constants.  A leading unary minus does not change the token type.
-      if Literal_Value.IVal <= 32767 then
-         return Integer_Type_Info ("int", "INT_MAX", Is_Promoted => True);
-      end if;
-      return Emit_Integer_Type
-        (Alias_Spelling,
-         Candidate ("#if", "int", "INT_MAX")
-         & (if Based then Candidate ("#elif", "unsigned int", "UINT_MAX")
-            else "")
-         & Candidate ("#elif", "long", "LONG_MAX")
-         & (if Based then Candidate ("#elif", "unsigned long", "ULONG_MAX")
-            else "")
-         & Candidate ("#elif", "long long", "LLONG_MAX")
-         & "#else" & ASCII.LF
-         & Integer_Type_Branch
-           (Alias_Spelling,
-            Integer_Type_Info ("unsigned long long", "ULLONG_MAX"))
-         & "#endif");
-      --  The final unsigned candidate also matches the existing compiler
-      --  extension for oversized decimal tokens.  Their original spelling
-      --  remains the responsibility of the existing literal generator.
-   end Literal_Integer_Type;
-
-   function Integer_Type_Of
-     (Node : Node_Id; Subprogram_Root : Node_Id) return BA_Integer_Type
-   is
-      use type Ocarina.AADL_Values.Literal_Type;
-
-      function Resolve
-        (Operand_Node : Node_Id;
-         Power_Base : Boolean := False;
-         Negate : Boolean := False) return BA_Integer_Type
-      is
-         Items : List_Id := No_List;
-         Item : Node_Id;
-         Result_Info : BA_Integer_Type;
-         Pending_Operator : Operator_Type := Op_None;
-         Has_Left : Boolean := False;
-      begin
-         case BATN.Kind (Operand_Node) is
-            when BATN.K_Literal =>
-               if Power_Base then
-                  declare
-                     Literal_Value : constant Ocarina.AADL_Values.Value_Type :=
-                       Ocarina.AADL_Values.Value (BATN.Value (Operand_Node));
-                  begin
-                     if Literal_Value.T = Ocarina.AADL_Values.LT_Integer then
-                        --  Bug 1 deliberately gives power literals an
-                        --  explicit 64-bit base type; preserve that return.
-                        if Literal_Value.ISign /= Negate
-                          or else Literal_Value.IVal <= 2 ** 63 - 1
-                        then
-                           return Integer_Type_Info ("int64_t", "INT64_MAX");
-                        else
-                           return Integer_Type_Info
-                             ("uint64_t", "UINT64_MAX");
-                        end if;
-                     end if;
-                  end;
-               else
-                  return Literal_Integer_Type (Operand_Node);
-               end if;
-            when BATN.K_Identifier | BATN.K_Name |
-                 BATN.K_Data_Component_Reference =>
-               return Declared_Integer_Type
-                 (Integer_Name_Instance (Operand_Node, Subprogram_Root),
-                  Operand_Node);
-            when BATN.K_Property_Constant =>
-               return Resolve
-                 (BATN.Identifier (Operand_Node), Power_Base, Negate);
-            when BATN.K_Integer_Value =>
-               return Resolve (BATN.Entity (Operand_Node), Power_Base, Negate);
-            when BATN.K_Value_Variable =>
-               if BATN.Is_Count (Operand_Node) then
-                  --  Evaluate_BA_Value_Variable stores count in int16_t.
-                  return Integer_Type_Info ("int16_t", "INT16_MAX");
-               end if;
-               return Resolve
-                 (BATN.Identifier (Operand_Node), Power_Base, Negate);
-            when BATN.K_Boolean_Literal =>
-               return Integer_Type_Info ("int", "INT_MAX");
-            when BATN.K_Factor =>
-               if BATN.Is_Not (Operand_Node) then
-                  return Integer_Type_Info ("int", "INT_MAX");
-               end if;
-               if Present (BATN.Upper_Value (Operand_Node)) then
-                  --  An outer unary minus does not change a power helper's
-                  --  declared return type. Only signs inside its base matter.
-                  return Resolve
-                    (BATN.Lower_Value (Operand_Node), Power_Base => True);
-               end if;
-               return Resolve
-                 (BATN.Lower_Value (Operand_Node), Power_Base, Negate);
-            when BATN.K_Value_Expression =>
-               Items := BATN.Relations (Operand_Node);
-            when BATN.K_Relation =>
-               Items := BATN.Simple_Exprs (Operand_Node);
-            when BATN.K_Simple_Expression =>
-               Items := BATN.Term_And_Operator (Operand_Node);
-            when BATN.K_Term =>
-               Items := BATN.Factors (Operand_Node);
-            when others =>
-               null;
-         end case;
-         if not BANu.Is_Empty (Items) then
-            Item := BATN.First_Node (Items);
-            while Present (Item) loop
-               if BATN.Kind (Item) = BATN.K_Operator then
-                  Pending_Operator := Evaluate_BA_Operator (Item);
-               elsif not Has_Left then
-                  Result_Info := Resolve
-                    (Item, Power_Base,
-                     Negate /= (Pending_Operator = Op_Minus));
-                  if Pending_Operator /= Op_None and then not Power_Base then
-                     Result_Info := Promote_Integer_Type (Result_Info);
-                  end if;
-                  Has_Left := True;
-                  Pending_Operator := Op_None;
-               else
-                  case Pending_Operator is
-                     when Op_Plus | Op_Minus | Op_Asterisk | Op_Slash |
-                          Op_Modulo =>
-                        Result_Info := Common_Integer_Type
-                          (Result_Info, Resolve (Item));
-                     when Op_And | Op_Or | Op_Equal_Equal | Op_Not_Equal |
-                          Op_Less | Op_Less_Equal | Op_Greater |
-                          Op_Greater_Equal =>
-                        Result_Info := Integer_Type_Info ("int", "INT_MAX");
-                     when others =>
-                        Display_Located_Error
-                          (BATN.Loc (Item),
-                           "Cannot determine integer expression type for mod",
-                           Fatal => True);
-                  end case;
-                  Pending_Operator := Op_None;
-               end if;
-               Item := BATN.Next_Node (Item);
-            end loop;
-            if Has_Left then
-               return Result_Info;
-            end if;
-         end if;
-         Display_Located_Error
-           (BATN.Loc (Operand_Node),
-            "Cannot determine the C integer type of this mod operand",
-            Fatal => True);
-         return (No_Name, No_Name, False);
-      end Resolve;
-   begin
-      return Resolve (Node);
-   end Integer_Type_Of;
-
    ------------------------------
    -- Is_To_Make_Init_Sequence --
    ------------------------------
@@ -4684,7 +4226,6 @@ package body Ocarina.Backends.C_Common.BA is
       Next_Statements : constant List_Id := New_List (CTN.K_Statement_List);
       Continue_Name   : constant Name_Id :=
         Get_String_Name ("_ba_for_continue");
-      Iterator_Frame  : aliased BA_Integer_Iterator;
    begin
 
       if BATN.Kind (In_Element_Values (Node)) = BATN.K_Integer_Range then
@@ -4704,20 +4245,11 @@ package body Ocarina.Backends.C_Common.BA is
             Statements);
          Element_Name := BATN.Display_Name (Element_Idt (Node));
 
-         --  Keep the declared iterator type available while mapping its body,
-         --  including nested loops and names that shadow an outer iterator.
-         Iterator_Frame :=
-           (Element_Name,
-            AAN.Default_Instance
-              (BATN.Corresponding_Declaration (BATN.Classifier_Ref (Node))),
-            Current_Integer_Iterator);
-         Current_Integer_Iterator := Iterator_Frame'Unchecked_Access;
          Map_C_Behav_Acts
            (Node         => Node,
             S            => S,
             Declarations => Declarations,
             WStatements  => Loop_Statements);
-         Current_Integer_Iterator := Iterator_Frame.Previous;
 
          --  Test after the body, before incrementing the iterator. In
          --  particular, never increment a maximum-valued upper bound.
@@ -5997,143 +5529,62 @@ package body Ocarina.Backends.C_Common.BA is
 
    end Evaluate_BA_Simple_Expression;
 
-   --------------------------
-   -- Ensure_Modulo_Helper --
-   --------------------------
+   -------------------------
+   -- Ensure_Modulo_Macro --
+   -------------------------
 
-   function Ensure_Modulo_Helper (Type_Name : Name_Id) return Name_Id is
-      Helper_Name : constant Name_Id := Get_String_Name
-        ("ocarina_ba_mod_" & Get_Name_String (Type_Name));
+   function Ensure_Modulo_Macro return Name_Id is
+      Macro_Name : constant Name_Id := Get_String_Name ("ocarina_ba_mod");
+      Definition_Name : constant Name_Id :=
+        Get_String_Name ("ocarina_ba_mod(ba_left, ba_right)");
       Existing_Node : Node_Id := CTN.First_Node
         (CTN.Declarations (Current_File));
-      Params : constant List_Id := New_List (CTN.K_Parameter_List);
-      Locals : constant List_Id := New_List (CTN.K_Declaration_List);
-      Body_Stmts : constant List_Id := New_List (CTN.K_Statement_List);
-      Unsigned_Stmts : constant List_Id := New_List (CTN.K_Statement_List);
-      Minus_One_Stmts : constant List_Id := New_List (CTN.K_Statement_List);
-      Adjust_Stmts : constant List_Id := New_List (CTN.K_Statement_List);
-
-      function Identifier (Text : String) return Node_Id is
-      begin
-         return Make_Defining_Identifier (Get_String_Name (Text), False);
-      end Identifier;
-
-      function Integer_Literal (Value : Unsigned_Long_Long) return Node_Id is
-      begin
-         return Make_Literal (CV.New_Int_Value (Value, 1, 10));
-      end Integer_Literal;
-
-      function Result_Type return Node_Id is
-      begin
-         return Make_Defining_Identifier (Type_Name, False);
-      end Result_Type;
-
-      function Typed_Minus_One return Node_Id is
-      begin
-         --  A signed literal emits (type)-1. Casting an unparenthesized
-         --  subtraction node here would instead emit (type)0 - 1.
-         return Make_Type_Conversion
-           (Result_Type, Make_Literal (CV.New_Int_Value (1, -1, 10)));
-      end Typed_Minus_One;
+      New_Line : constant String :=
+        " " & Character'Val (92) & ASCII.LF & "  ";
+      --  These unevaluated operands give zero the same promoted common type
+      --  as left % right, without inspecting AADL classifiers or C widths.
+      Common_Zero : constant String :=
+        "(0 ? (ba_left) : (0 ? (ba_right) : 0))";
+      Divisor : constant String := "(" & Common_Zero & " + (ba_right))";
+      Remainder : constant String := "((ba_left) % (ba_right))";
+      Definition : constant String :=
+        "((" & Divisor & " < 1 && "
+        & Divisor & " == (" & Common_Zero & " - 1))" & New_Line
+        & " ? 0 : (" & Remainder & New_Line
+        & " + ((" & Remainder & " != 0 && " & New_Line
+        & "     ((" & Remainder & " < 1) != (" & Divisor & " < 1)))"
+        & New_Line & "    ? " & Divisor & " : 0)))";
    begin
-      --  The caller supplies the promoted common C type, including aliases
-      --  selected by the target compiler. Keep one helper for each alias.
       while Present (Existing_Node) loop
-         if CTN.Kind (Existing_Node) = CTN.K_Function_Implementation
-           and then CTN.Name
-             (CTN.Defining_Identifier (CTN.Specification (Existing_Node))) =
-               Helper_Name
+         if CTN.Kind (Existing_Node) = CTN.K_Define_Statement
+           and then CTN.Name (CTN.Defining_Identifier (Existing_Node)) =
+             Definition_Name
          then
-            return Helper_Name;
+            return Macro_Name;
          end if;
          Existing_Node := CTN.Next_Node (Existing_Node);
       end loop;
 
       Append_Node_To_List
-        (Make_Parameter_Specification
-           (Identifier ("ba_mod_left"), Result_Type), Params);
-      Append_Node_To_List
-        (Make_Parameter_Specification
-           (Identifier ("ba_mod_right"), Result_Type), Params);
-      Append_Node_To_List
-        (Make_Variable_Declaration
-           (Identifier ("ba_mod_remainder"), Result_Type), Locals);
-      Append_Node_To_List
         (Message_Comment
-           ("Modulo evaluates each operand once and retains their common "
-            & "C integer type. Unsigned remainder already has the required "
-            & "nonnegative result."), Body_Stmts);
-      Append_Node_To_List
-        (Make_Return_Statement
-           (Make_Expression
-              (Identifier ("ba_mod_left"), Op_Modulo,
-               Identifier ("ba_mod_right"))), Unsigned_Stmts);
-      Append_Node_To_List
-        (Make_If_Statement
-           (Make_Expression
-              (Typed_Minus_One, Op_Greater, Integer_Literal (0)),
-            Unsigned_Stmts), Body_Stmts);
-
-      Append_Node_To_List
-        (Message_Comment
-           ("A signed divisor of -1 always gives zero. Handle it before "
-            & "remainder so the signed minimum does not trigger C's "
-            & "unrepresentable minimum / -1 operation."), Body_Stmts);
-      Append_Node_To_List
-        (Make_Return_Statement (Integer_Literal (0)), Minus_One_Stmts);
-      Append_Node_To_List
-        (Make_If_Statement
-           (Make_Expression
-              (Identifier ("ba_mod_right"), Op_Equal_Equal,
-               Typed_Minus_One), Minus_One_Stmts), Body_Stmts);
-      Append_Node_To_List
-        (Make_Assignment_Statement
-           (Identifier ("ba_mod_remainder"), Make_Expression
-              (Identifier ("ba_mod_left"), Op_Modulo,
-               Identifier ("ba_mod_right"))), Body_Stmts);
-
-      Append_Node_To_List
-        (Message_Comment
-           ("Only a nonzero remainder with the wrong sign needs correction. "
-            & "The opposite signs make the addition safe. Compare with one "
-            & "so this shared body also compiles for an unsigned alias."),
-         Body_Stmts);
-      Append_Node_To_List
-        (Make_Assignment_Statement
-           (Identifier ("ba_mod_remainder"), Make_Expression
-              (Identifier ("ba_mod_remainder"), Op_Plus,
-               Identifier ("ba_mod_right"))), Adjust_Stmts);
-      Append_Node_To_List
-        (Make_If_Statement
-           (Make_Expression
-              (Make_Expression
-                 (Identifier ("ba_mod_remainder"), Op_Not_Equal,
-                  Integer_Literal (0)), Op_And,
-               Make_Expression
-                 (Make_Expression
-                    (Make_Expression
-                       (Identifier ("ba_mod_remainder"), Op_Less,
-                        Integer_Literal (1)), Op_And,
-                     Make_Expression
-                       (Identifier ("ba_mod_right"), Op_Greater,
-                        Integer_Literal (0))), Op_Or,
-                  Make_Expression
-                    (Make_Expression
-                       (Identifier ("ba_mod_remainder"), Op_Greater,
-                        Integer_Literal (0)), Op_And,
-                     Make_Expression
-                       (Identifier ("ba_mod_right"), Op_Less,
-                        Integer_Literal (1))))), Adjust_Stmts), Body_Stmts);
-      Append_Node_To_List
-        (Make_Return_Statement (Identifier ("ba_mod_remainder")), Body_Stmts);
-      Append_Node_To_List
-        (Make_Function_Implementation
-           (Make_Function_Specification
-              (Make_Defining_Identifier (Helper_Name, False), Params,
-               Result_Type), Locals, Body_Stmts),
+           ("BA mod expands as a C99 expression and may evaluate operands "
+            & "more than once. Unevaluated conditional operands preserve "
+            & "the common C integer type for the divisor and minus one."),
          CTN.Declarations (Current_File));
-      return Helper_Name;
-   end Ensure_Modulo_Helper;
+      Append_Node_To_List
+        (Message_Comment
+           ("Handle a signed divisor of -1 before remainder to avoid "
+            & "MIN % -1 overflow. Add the divisor only to a nonzero "
+            & "remainder of the opposite sign; this addition cannot "
+            & "overflow. Comparisons with one also work for unsigned types."),
+         CTN.Declarations (Current_File));
+      Append_Node_To_List
+        (Make_Define_Statement
+           (Make_Defining_Identifier (Definition_Name, False),
+            Make_Defining_Identifier (Get_String_Name (Definition), False)),
+         CTN.Declarations (Current_File));
+      return Macro_Name;
+   end Ensure_Modulo_Macro;
 
    ----------------------
    -- Evaluate_BA_Term --
@@ -6155,29 +5606,9 @@ package body Ocarina.Backends.C_Common.BA is
       Right_Expr : Node_Id := No_Node;
       Op         : Operator_Type := Op_None;
       Expr       : Node_Id;
-      Last_Mod_Factor : Node_Id := No_Node;
-      Need_Types : Boolean;
-      Left_Type, Right_Type : BA_Integer_Type;
    begin
 
-      --  Infer only the prefix needed by the last mod. An ordinary term,
-      --  or a floating-point suffix after its last mod, follows the existing
-      --  generation path without integer type analysis.
       N := BATN.First_Node (Factors (Node));
-      while Present (N) loop
-         if BATN.Kind (N) = BATN.K_Operator and then
-           Operator_Kind'Val (BATN.Operator_Category (N)) = OK_Mod
-         then
-            Last_Mod_Factor := BATN.Next_Node (N);
-         end if;
-         N := BATN.Next_Node (N);
-      end loop;
-      Need_Types := Present (Last_Mod_Factor);
-      N := BATN.First_Node (Factors (Node));
-      if Need_Types then
-         Left_Type := Integer_Type_Of (N, Subprogram_Root);
-      end if;
-
       Left_Expr := Evaluate_BA_Factor (N, Is_Out_Parameter,
                                        Subprogram_Root,
                                        Declarations, Statements,
@@ -6198,9 +5629,6 @@ package body Ocarina.Backends.C_Common.BA is
                      Subprogram_Root  => Subprogram_Root,
                      Declarations     => Declarations,
                      Statements       => Statements);
-                  if Need_Types then
-                     Right_Type := Integer_Type_Of (N, Subprogram_Root);
-                  end if;
                when BATN.K_Operator =>
                   Op := Evaluate_BA_Operator (N);
                when others     => Display_Error
@@ -6210,19 +5638,13 @@ package body Ocarina.Backends.C_Common.BA is
             if Right_Expr /= No_Node and then
               Op /= Op_None
             then
-               if Need_Types then
-                  Left_Type := Common_Integer_Type (Left_Type, Right_Type);
-               end if;
                if Op = Op_Modulo then
                   Expr := Make_Call_Profile
                     (Make_Defining_Identifier
-                       (Ensure_Modulo_Helper (Left_Type.Type_Name), False),
+                       (Ensure_Modulo_Macro, False),
                      Make_List_Id (Left_Expr, Right_Expr));
                else
                   Expr := Make_Expression (Left_Expr, Op, Right_Expr);
-               end if;
-               if N = Last_Mod_Factor then
-                  Need_Types := False;
                end if;
                Left_Expr := Expr;
                Op := Op_None;

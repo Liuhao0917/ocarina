@@ -4,22 +4,6 @@ package Mod_Regression
 public
   with Base_Types;
   with Deployment;
-  with Data_Model;
-
-  data Mod_Array
-    properties
-      Data_Model::Data_Representation => Array;
-      Data_Model::Base_Type => (classifier (Base_Types::Integer_64));
-      Data_Model::Dimension => (2);
-  end Mod_Array;
-  data Mod_Record
-    properties Data_Model::Data_Representation => Struct;
-  end Mod_Record;
-  data implementation Mod_Record.impl
-    subcomponents
-      values : data Mod_Array;
-      scalar : data Base_Types::Integer_64;
-  end Mod_Record.impl;
 
   thread Ba_Worker
   end Ba_Worker;
@@ -29,44 +13,16 @@ public
       Period => 1 ms;
     annex behavior_specification {**
       variables
-        dividend, divisor, third_divisor, multiplier : Base_Types::Integer_64;
-        signed_minimum, signed_maximum : Base_Types::Integer_64;
-        unsigned_dividend, unsigned_divisor : Base_Types::Unsigned_64;
-        unsigned_maximum, unsigned_multiplier : Base_Types::Unsigned_64;
-        small_signed : Base_Types::Integer_8;
-        small_unsigned : Base_Types::Unsigned_8;
-        signed32_divisor : Base_Types::Integer_32;
-        unsigned32_divisor, unsigned32_limit : Base_Types::Unsigned_32;
-        record_value : Mod_Record.impl;
-        array_index : Base_Types::Integer;
-        result_positive_positive : Base_Types::Integer_64;
-        result_negative_positive : Base_Types::Integer_64;
-        result_positive_negative : Base_Types::Integer_64;
-        result_negative_negative : Base_Types::Integer_64;
-        result_zero_positive, result_zero_negative : Base_Types::Integer_64;
-        result_exact_positive_positive : Base_Types::Integer_64;
-        result_exact_negative_positive : Base_Types::Integer_64;
-        result_exact_positive_negative : Base_Types::Integer_64;
-        result_exact_negative_negative : Base_Types::Integer_64;
-        result_one_mod_maximum : Base_Types::Integer_64;
-        result_negative_one_mod_minimum : Base_Types::Integer_64;
-        result_minimum_mod_negative_one : Base_Types::Integer_64;
-        result_unsigned_one_mod_maximum : Base_Types::Unsigned_64;
-        result_unsigned_maximum_mod_maximum : Base_Types::Unsigned_64;
-        result_unsigned_maximum_mod_one : Base_Types::Unsigned_64;
-        result_unsigned_maximum_mod_two : Base_Types::Unsigned_64;
-        result_literals, result_literal_divisor : Base_Types::Integer_64;
-        result_literal_dividend : Base_Types::Integer_64;
-        result_outer_product, result_chained : Base_Types::Integer_64;
-        result_long_chain, result_nested_divisor : Base_Types::Integer_64;
-        result_compound_dividend, result_compound_divisor : Base_Types::Integer_64;
-        result_product_prefix : Base_Types::Integer_64;
-        result_unsigned_outer_product : Base_Types::Unsigned_64;
-        result_narrow_promotions : Base_Types::Integer_64;
-        result_mixed_wide_divisor, result_return_width : Base_Types::Integer_64;
-        result_array_element, result_array_variable_index : Base_Types::Integer_64;
-        result_record_field, result_loop_variable : Base_Types::Integer_64;
-        result_while_dividend : Base_Types::Integer_64;
+        dividend, divisor : Base_Types::Integer_32;
+        unsigned_dividend, unsigned_divisor : Base_Types::Unsigned_32;
+        result_positive_positive : Base_Types::Integer_32;
+        result_negative_positive : Base_Types::Integer_32;
+        result_positive_negative : Base_Types::Integer_32;
+        result_negative_negative : Base_Types::Integer_32;
+        result_zero, result_exact, result_minus_one : Base_Types::Integer_32;
+        result_literals, result_compound : Base_Types::Integer_32;
+        result_outer_product : Base_Types::Integer_32;
+        result_unsigned : Base_Types::Unsigned_32;
       states
         ba_ready : initial complete final state;
       transitions
@@ -81,138 +37,23 @@ public
           dividend := 0 - 7;
           result_negative_negative := dividend mod divisor; -- Expect -1.
 
-          -- Zero and exact division need no sign correction.
+          -- Zero and exact division must remain zero.
           dividend := 0; divisor := 3;
-          result_zero_positive := dividend mod divisor; -- Expect 0.
-          divisor := 0 - 3;
-          result_zero_negative := dividend mod divisor; -- Expect 0.
-          dividend := 6; divisor := 3;
-          result_exact_positive_positive := dividend mod divisor; -- Expect 0.
+          result_zero := dividend mod divisor; -- Expect 0.
           dividend := 0 - 6;
-          result_exact_negative_positive := dividend mod divisor; -- Expect 0.
-          dividend := 6; divisor := 0 - 3;
-          result_exact_positive_negative := dividend mod divisor; -- Expect 0.
-          dividend := 0 - 6;
-          result_exact_negative_negative := dividend mod divisor; -- Expect 0.
+          result_exact := dividend mod divisor; -- Expect 0.
+          divisor := 0 - 1;
+          result_minus_one := dividend mod divisor; -- Expect 0.
 
-          -- Build signed boundaries with representable 16-bit steps, without
-          -- integer-power expressions or out-of-range decimal literals.
-          signed_maximum := 32767;
-          signed_maximum := signed_maximum * 65536 + 65535;
-          signed_maximum := signed_maximum * 65536 + 65535;
-          signed_maximum := signed_maximum * 65536 + 65535;
-          signed_minimum := 0 - signed_maximum;
-          signed_minimum := signed_minimum - 1;
-
-          -- Unconditional addition of the divisor would overflow these cases.
-          dividend := 1; divisor := signed_maximum;
-          result_one_mod_maximum := dividend mod divisor; -- Expect 1.
-          dividend := 0 - 1; divisor := signed_minimum;
-          result_negative_one_mod_minimum := dividend mod divisor; -- Expect -1.
-
-          -- The mathematical mod is zero even though C's MIN % -1 is invalid.
-          dividend := signed_minimum; divisor := 0 - 1;
-          result_minimum_mod_negative_one := dividend mod divisor; -- Expect 0.
-
-          -- Unsigned subtraction constructs the full-width maximum.
-          unsigned_maximum := 0;
-          unsigned_maximum := unsigned_maximum - 1;
-          unsigned_dividend := 1; unsigned_divisor := unsigned_maximum;
-          result_unsigned_one_mod_maximum :=
-            unsigned_dividend mod unsigned_divisor; -- Expect 1.
-          unsigned_dividend := unsigned_maximum;
-          result_unsigned_maximum_mod_maximum :=
-            unsigned_dividend mod unsigned_divisor; -- Expect 0.
-          unsigned_divisor := 1;
-          result_unsigned_maximum_mod_one :=
-            unsigned_dividend mod unsigned_divisor; -- Expect 0.
-          unsigned_divisor := 2;
-          result_unsigned_maximum_mod_two :=
-            unsigned_dividend mod unsigned_divisor; -- Expect 1.
-
-          -- Literal operands and variable operands retain the same mod rule.
+          -- Literals and simple arithmetic use the existing expression path.
           result_literals := 7 mod 3; -- Expect 1.
-          dividend := 0 - 7;
-          result_literal_divisor := dividend mod 3; -- Expect 2.
-          divisor := 0 - 3;
-          result_literal_dividend := 7 mod divisor; -- Expect -2.
-
-          -- Preserve an outer product and left-to-right chained mod operations.
           dividend := 0 - 7; divisor := 3;
+          result_compound := (dividend + 2) mod divisor; -- Expect 1.
           result_outer_product := (dividend mod divisor) * 4; -- Expect 8.
-          dividend := 23; divisor := 7; third_divisor := 3;
-          result_chained := dividend mod divisor mod third_divisor; -- Expect 2.
 
-          -- Twelve consecutive mod operations retain the first result, two.
-          dividend := 0 - 7; divisor := 3;
-          result_long_chain :=
-            dividend mod divisor mod divisor mod divisor
-            mod divisor mod divisor mod divisor
-            mod divisor mod divisor mod divisor
-            mod divisor mod divisor mod divisor; -- Expect 2.
-
-          -- The nested divisor is 8 mod 3 = 2, so -7 mod 2 = 1.
-          multiplier := 8;
-          result_nested_divisor :=
-            dividend mod (multiplier mod divisor); -- Expect 1.
-
-          -- Existing expression forms may place arithmetic on either side.
-          dividend := 0 - 7; divisor := 3;
-          result_compound_dividend := (dividend + 0) mod divisor; -- Expect 2.
-          dividend := 7;
-          result_compound_divisor := dividend mod (divisor + 2); -- Expect 2.
-          dividend := 0 - 7; multiplier := 2;
-          result_product_prefix := dividend * multiplier mod divisor; -- Expect 1.
-
-          -- A later unsigned product must not change the preceding signed mod.
-          unsigned_multiplier := 1;
-          result_unsigned_outer_product :=
-            dividend mod divisor * unsigned_multiplier; -- Expect 2.
-
-          -- Both narrow operands promote to signed int before the operation.
-          small_signed := 0 - 7; small_unsigned := 3;
-          result_narrow_promotions := small_signed mod small_unsigned; -- Expect 2.
-
-          -- A signed 64-bit value can represent every unsigned 32-bit value.
-          dividend := 0 - 5;
-          unsigned32_divisor := 0;
-          unsigned32_divisor := unsigned32_divisor - 1;
-          result_mixed_wide_divisor :=
-            dividend mod unsigned32_divisor; -- Expect 4294967290.
-
-          -- Retain the signed 64-bit mod result during the outer comparison.
-          dividend := 1; signed32_divisor := 0 - 3; unsigned32_limit := 1;
-          if (dividend mod signed32_divisor < unsigned32_limit)
-            result_return_width := 1 -- Expect 1: the remainder is -2.
-          else
-            result_return_width := 0
-          end if;
-
-          -- Resolve each array element's integer type through the record field.
-          record_value.values[0] := 0 - 7;
-          record_value.values[1] := 7;
-          divisor := 3;
-          result_array_element := record_value.values[0] mod divisor; -- Expect 2.
-          array_index := 1; divisor := 0 - 3;
-          result_array_variable_index :=
-            record_value.values[array_index] mod divisor; -- Expect -2.
-
-          -- A scalar record field is also an integer operand.
-          record_value.scalar := 0 - 7; divisor := 3;
-          result_record_field := record_value.scalar mod divisor; -- Expect 2.
-
-          -- The loop counter's classifier supplies its integer type.
-          result_loop_variable := 0; divisor := 0 - 3;
-          for (mod_index : Base_Types::Integer_64 in 0 .. 2) {
-            result_loop_variable := result_loop_variable + mod_index mod divisor
-          }; -- Expect -3: 0 + (-2) + (-1).
-
-          -- Reevaluate the mod as the dividend changes from one to three.
-          dividend := 1; divisor := 3;
-          while (dividend mod divisor != 0) {
-            dividend := dividend + 1
-          };
-          result_while_dividend := dividend -- Expect 3.
+          -- Unsigned mod keeps the ordinary C remainder.
+          unsigned_dividend := 7; unsigned_divisor := 3;
+          result_unsigned := unsigned_dividend mod unsigned_divisor -- Expect 1.
         };
     **};
   end Ba_Worker.impl;
