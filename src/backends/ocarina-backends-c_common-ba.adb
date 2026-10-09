@@ -160,6 +160,14 @@ package body Ocarina.Backends.C_Common.BA is
       Statements       : List_Id;
       Index_Transition : in out Unsigned_Long_Long) return List_Id;
 
+   function Has_Higher_Transition_Priority
+     (Left, Right : Node_Id) return Boolean;
+   --  Explicit priorities precede unspecified priorities. Equal priorities
+   --  retain their declaration order.
+
+   procedure Sort_Transitions_By_Priority (Transition_List : List_Id);
+   --  Stably sort a collected transition list in descending priority order.
+
    procedure Map_C_A_List_Of_Transitions
      (S                         : Node_Id;
       BA                        : Node_Id;
@@ -3204,6 +3212,74 @@ package body Ocarina.Backends.C_Common.BA is
 
    end Map_C_A_List_Of_On_Dispatch_Transitions;
 
+   ------------------------------------
+   -- Has_Higher_Transition_Priority --
+   ------------------------------------
+
+   function Has_Higher_Transition_Priority
+     (Left, Right : Node_Id) return Boolean
+   is
+      use Ocarina.AADL_Values;
+      Left_Priority : constant Node_Id :=
+        BATN.Behavior_Transition_Priority (Left);
+      Right_Priority : constant Node_Id :=
+        BATN.Behavior_Transition_Priority (Right);
+   begin
+      if No (Left_Priority) then
+         return False;
+      elsif No (Right_Priority) then
+         return True;
+      end if;
+
+      --  Compare the stored values without narrowing integer priorities to
+      --  a signed type. An explicit zero still precedes an omitted priority.
+      return Value (BATN.Value (Right_Priority)) <
+        Value (BATN.Value (Left_Priority));
+   end Has_Higher_Transition_Priority;
+
+   ----------------------------------
+   -- Sort_Transitions_By_Priority --
+   ----------------------------------
+
+   procedure Sort_Transitions_By_Priority (Transition_List : List_Id) is
+      Transitions : array (1 .. BANu.Length (Transition_List)) of Node_Id;
+      Current     : Node_Id;
+      Position    : Positive;
+   begin
+      if Transitions'Length < 2 then
+         return;
+      end if;
+
+      Current := BATN.First_Node (Transition_List);
+      for Index in Transitions'Range loop
+         Transitions (Index) := Current;
+         Current := BATN.Next_Node (Current);
+      end loop;
+
+      --  Stable insertion sort keeps the first declared transition first
+      --  when priorities are equal or both unspecified. Relink only after
+      --  sorting, so moving a node cannot accidentally move its successors.
+      for Index in 2 .. Transitions'Last loop
+         Current := Transitions (Index);
+         Position := Index;
+         while Position > Transitions'First and then
+           Has_Higher_Transition_Priority
+             (Current, Transitions (Position - 1))
+         loop
+            Transitions (Position) := Transitions (Position - 1);
+            Position := Position - 1;
+         end loop;
+         Transitions (Position) := Current;
+      end loop;
+
+      BATN.Set_First_Node (Transition_List, Transitions (Transitions'First));
+      for Index in Transitions'First .. Transitions'Last - 1 loop
+         BATN.Set_Next_Node (Transitions (Index), Transitions (Index + 1));
+      end loop;
+      BATN.Set_Next_Node (Transitions (Transitions'Last), No_Node);
+      BATN.Set_Last_Node (Transition_List, Transitions (Transitions'Last));
+   end Sort_Transitions_By_Priority;
+
    ---------------------------------
    -- Map_C_A_List_Of_Transitions --
    ---------------------------------
@@ -3225,6 +3301,15 @@ package body Ocarina.Backends.C_Common.BA is
       Else_Stats    : List_Id;
 
    begin
+      if BANu.Length (Sub_Transition_List) > 1 then
+         Sort_Transitions_By_Priority (Sub_Transition_List);
+         CTU.Append_Node_To_List
+           (Message_Comment
+              ("Check transitions in descending priority; unspecified "
+               & "priorities are lowest and ties keep declaration order. "
+               & "Use otherwise only when all other conditions are false."),
+            WStatements);
+      end if;
 
       if Present (Otherwise_Transition_Node) then
          Else_Stats := New_List (CTN.K_Statement_List);
@@ -4104,6 +4189,7 @@ package body Ocarina.Backends.C_Common.BA is
          Behav_Transition : Node_Id :=
            BATN.First_Node (BATN.Transitions (BA));
          Transition_Node, Source : Node_Id;
+         Selected : Node_Id := No_Node;
       begin
          while Present (Behav_Transition) loop
             Transition_Node := BATN.Transition (Behav_Transition);
@@ -4122,14 +4208,20 @@ package body Ocarina.Backends.C_Common.BA is
                   if State_Name = Standard.Utils.To_Upper
                     (BATN.Display_Name (Source))
                   then
-                     return Transition_Node;
+                     if No (Selected) or else
+                       Has_Higher_Transition_Priority
+                         (Transition_Node, Selected)
+                     then
+                        Selected := Transition_Node;
+                     end if;
+                     exit;
                   end if;
                   Source := BATN.Next_Node (Source);
                end loop;
             end if;
             Behav_Transition := BATN.Next_Node (Behav_Transition);
          end loop;
-         return No_Node;
+         return Selected;
       end Find_Dispatch_Transition;
    begin
       Map_C_Behavior_Variables (S, Declarations);
@@ -4186,8 +4278,9 @@ package body Ocarina.Backends.C_Common.BA is
       if Has_Dispatch_Transitions then
          Append_Node_To_List
            (Message_Comment
-              ("Select the on-dispatch transition from the current "
-               & "complete state; take one dispatch transition per call."),
+              ("Select the highest-priority on-dispatch transition from "
+               & "the current complete state; take one dispatch "
+               & "transition per call."),
             Statements);
          Append_Node_To_List
            (Make_Switch_Alternative (No_List, No_List),
